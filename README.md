@@ -66,10 +66,15 @@ SELECT COUNT(*) FROM bvg_events;
   spark_gold.py
 ```
 14. Make a tunnel in MobaXterm. Specifically go to Tunneling -> New SSH tunnel and there type:
+
 Forwarded port: 10000
+
 Remote server: 127.0.0.1
+
 Remote port: 10000
+
 SSH server: all the data that are used to access the vm
+
 15. Start a Python environment in your IDE with requirements.txt provided 
 ```
 python -m venv venv
