@@ -7,21 +7,17 @@ from pyspark.sql.functions import (
 from pyspark.sql.types import *
 import sys
 
-# ==============================================================================
 # 1. KONFIGURACJA SPARKA
-# ==============================================================================
 spark = (
     SparkSession.builder
         .appName("silver_merge")
         .enableHiveSupport()
         .config("spark.sql.warehouse.dir", "hdfs://node1/user/hive/warehouse")
         .config("spark.sql.catalogImplementation", "hive")
-        # Optymalizacja shuffle dla małych danych w streamingu (domyślnie 200)
         .config("spark.sql.shuffle.partitions", "5") 
         .getOrCreate()
 )
 
-# Konfiguracja formatów i zapisu
 spark.conf.set("spark.sql.parquet.enableVectorizedReader", "false")
 spark.conf.set("spark.sql.parquet.enableVectorizedWriter", "false")
 spark.conf.set("spark.sql.parquet.outputTimestampType", "INT96")
@@ -32,24 +28,18 @@ spark.conf.set("spark.sql.columnVector.batchSize", "1024")
 spark.conf.set("spark.sql.streaming.schemaInference", "true")
 spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
 
-# ==============================================================================
 # 2. SCHEMATY DANYCH
-# ==============================================================================
 
-# NEXTBIKE SCHEMA - Nadzbiór pól ze statusu, informacji i free_bikes
 next_bike_schema = StructType([
-    # Pola wspólne / kluczowe
     StructField("station_id", StringType()),
     StructField("last_reported", LongType()),
     
-    # Pola ze STATUSU (widoczne w Twoim logu)
     StructField("num_bikes_available", IntegerType()),
     StructField("num_docks_available", IntegerType()),
     StructField("is_installed", IntegerType()),
     StructField("is_renting", IntegerType()),
     StructField("is_returning", IntegerType()),
     
-    # Pola z INFORMATION (mogą wpadać jako oddzielne JSONy)
     StructField("name", StringType()),
     StructField("short_name", StringType()),
     StructField("lat", DoubleType()),
@@ -57,14 +47,11 @@ next_bike_schema = StructType([
     StructField("region_id", StringType()),
     StructField("capacity", IntegerType()),
     
-    # Pola dla free bikes (do odfiltrowania)
     StructField("bike_id", StringType())
 ])
 
-# CSV używa tego samego schematu
 next_bike_csv_schema = next_bike_schema
 
-# CSV ma czasem inną strukturę, więc warto mieć backup (opcjonalnie tożsame z powyższym)
 next_bike_csv_schema = next_bike_schema
 
 weather_schema = StructType([
@@ -89,59 +76,40 @@ bvg_schema = StructType([
     StructField("arrival", StringType())
 ])
 
-# ==============================================================================
 # 3. FUNKCJE NORMALIZUJĄCE
-# ==============================================================================
 
 def normalize_nextbike(df):
-    # =========================================================
-    # 1. Odsiewanie FREE BIKES (tylko to, co ma station_id)
-    # =========================================================
+
     df = df.filter(col("station_id").isNotNull())
 
-    # Dodajemy czas ingestu do okien czasowych
     df = df.withColumn("station_id", substring(col("station_id").cast("string"), 1, 50)) \
            .withColumn("ingestion_ts", current_timestamp())
 
-    # =========================================================
-    # 2. MERGE (Scalanie informacji i statusów)
-    # =========================================================
-    # Czekamy 5 minut, żeby zebrać do kupy Info i Status dla danej stacji
     df = df.withWatermark("ingestion_ts", "10 minutes")
 
     df_merged = df.groupBy(
         window(col("ingestion_ts"), "5 minutes"), 
         col("station_id")
     ).agg(
-        # Magia: weź ostatnią NIE-PUSTĄ nazwę, lat, lon
         last("name", ignorenulls=True).alias("station_name_raw"),
         last("lat", ignorenulls=True).alias("lat"),
         last("lon", ignorenulls=True).alias("lon"),
         last("region_id", ignorenulls=True).alias("region_id"),
         
-        # Weź maksymalną liczbę rowerów (żeby nie wziąć nulla z komunikatu Info)
         max("num_bikes_available").alias("num_bikes_available"),
         max("num_docks_available").alias("num_docks_available"),
         max("capacity").alias("capacity"),
         
-        # Timestamp
         max("ingestion_ts").alias("events_ts")
     )
 
-    # =========================================================
-    # 3. Czyszczenie wyników
-    # =========================================================
     df = (
         df_merged
         .withColumn("dt", to_date("events_ts"))
         .withColumn("hour", hour("events_ts"))
         .withColumn("source", lit("nextbike"))
-        
-        # Uzupełnianie nazw (jeśli Info nie przyszło w tym oknie, zostanie ID)
         .withColumn("station_name", coalesce(col("station_name_raw"), col("station_id")))
         .withColumn("area_id", coalesce(col("region_id"), lit("unknown_area")))
-        
-        # Liczby
         .withColumn("bikes_available", coalesce(col("num_bikes_available"), lit(0)).cast(IntegerType()))
         .withColumn(
             "slots_available",
@@ -151,11 +119,6 @@ def normalize_nextbike(df):
         .withColumn("is_disabled", lit(0))
     )
 
-    # WAŻNE: Nie filtrujemy tutaj po lat/lon, bo jeśli w danym oknie
-    # nie przyszedł komunikat "Info", to lat/lon mogą być null.
-    # Chcemy te dane mimo wszystko zapisać!
-    
-    # 4. Hashing
     hash_cols = [
         "station_id", "station_name", "bikes_available", "slots_available", "events_ts"
     ]
@@ -215,7 +178,6 @@ def normalize_bvg(df):
 
     df = df.withWatermark("event_ts", "1 hour")
 
-    # Agregacja BVG
     df_agg = (
         df.groupBy(
             window("event_ts", "1 hour")
@@ -239,9 +201,7 @@ def normalize_bvg(df):
         "canceled_trips_count", "dt_partition", "hour"
     )
 
-# ==============================================================================
-# 4. FUNKCJE POMOCNICZE I/O
-# ==============================================================================
+# 4. FUNKCJE POMOCNICZE 
 
 def write_to_silver_batch(df, table_name, partition_cols):
     spark.sql("CREATE DATABASE IF NOT EXISTS silver")
@@ -253,12 +213,8 @@ def write_to_silver_batch(df, table_name, partition_cols):
     )
 
 def write_to_silver_stream(batch_df, batch_id, table_name, partition_cols):
-    # Funkcja wywoływana w foreachBatch
-    # Cache jest przydatny, jeśli df jest używany wielokrotnie, ale przy append table nie zawsze konieczny
-    # batch_df.persist() 
     if batch_df.count() > 0:
         write_to_silver_batch(batch_df, table_name, partition_cols)
-    # batch_df.unpersist()
 
 def read_kafka_or_hdfs(topic, schema, hdfs_path, normalize_func, csv_schema=None):
     try:
@@ -269,12 +225,11 @@ def read_kafka_or_hdfs(topic, schema, hdfs_path, normalize_func, csv_schema=None
                  .option("kafka.bootstrap.servers", "localhost:9092")
                  .option("subscribe", topic)
                  .option("startingOffsets", "earliest")
-                 .option("failOnDataLoss", "false") # Bezpiecznik
+                 .option("failOnDataLoss", "false") 
                  .load()
                  .select(from_json(col("value").cast("string"), schema).alias("data"))
                  .select("data.*")
         )
-        # Normalizacja dla strumienia
         df = normalize_func(df)
         return df, True
     except Exception as e:
@@ -291,32 +246,25 @@ def read_kafka_or_hdfs(topic, schema, hdfs_path, normalize_func, csv_schema=None
                      mode="DROPMALFORMED"
                  )
         )
-        # Normalizacja dla batcha
-        # Uwaga: Dla batcha funkcje z window() mogą zachowywać się inaczej (bez watermarka),
-        # ale Spark SQL to obsłuży.
         df = normalize_func(df)
         return df, False
 
-# ==============================================================================
-# 5. GŁÓWNA LOGIKA PRZETWARZANIA
-# ==============================================================================
+# 5. GŁÓWNA LOGIKA 
 
 # --- NEXTBIKE ---
 nextbike_df, streaming_nextbike = read_kafka_or_hdfs(
     "raw.bike",
-    next_bike_schema,         # <--- Użyj tego szerokiego schematu
+    next_bike_schema,       
     "nifi_out/bike_*.csv",
     normalize_nextbike,
     csv_schema=next_bike_schema
 )
 
 if streaming_nextbike:
-    # Używamy outputMode "append" dla agregacji z watermarkiem (emituje wynik po zamknięciu okna)
-    # Jeśli chcesz natychmiastowe wyniki (partial), użyj "update"
     query_nextbike = (
         nextbike_df.writeStream
         .foreachBatch(lambda batch_df, batch_id: write_to_silver_stream(batch_df, batch_id, "nextbike_states", ["dt"]))
-        .outputMode("append") # append czeka na watermark, update daje wyniki na bieżąco
+        .outputMode("append")
         .option("checkpointLocation", "/chk/silver/nextbike_states")
         .start()
     )
@@ -354,13 +302,13 @@ if streaming_bvg:
     query_bvg = (
         bvg_df.writeStream
         .foreachBatch(lambda batch_df, batch_id: write_to_silver_stream(batch_df, batch_id, "bvg_events", ["dt_partition"]))
-        .outputMode("append") # Tutaj też mamy agregację window
+        .outputMode("append") 
         .option("checkpointLocation", "/chk/silver/bvg_events")
         .start()
     )
 else:
     write_to_silver_batch(bvg_df, "bvg_events", ["dt_partition"])
 
-# --- Czekanie na zakończenie ---
 if streaming_nextbike or streaming_weather or streaming_bvg:
+
     spark.streams.awaitAnyTermination()

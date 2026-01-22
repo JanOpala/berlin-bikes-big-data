@@ -21,7 +21,22 @@ bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic raw.bike 
 bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic raw.weather --partitions 1 --replication-factor 1
 bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic raw.bvg --partitions 1 --replication-factor 1
 ```
-6. Restart NiFi using:
+6. Put spark_silver_merge_11.py and spark_gold1.py in /home/vagrant directory
+7. Remove checkpoints
+```
+cd /home/vagrant
+hdfs dfs -rm -r -f /chk/silver/bvg_events
+hdfs dfs -rm -r -f /chk/silver/weather_observations
+hdfs dfs -rm -r -f /chk/silver/nextbike_states
+```
+8. Run spark silver with Kafka
+```
+/usr/local/spark/bin/spark-submit \
+  --master local[2] \
+  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.2 \
+  spark_silver_merge_11.py
+```
+9. Restart NiFi using:
 ```
 cd /usr/local/nifi-1.14.0/bin
 ./nifi.sh status
@@ -29,23 +44,9 @@ cd /usr/local/nifi-1.14.0/bin
 ./nifi.sh start
 ./nifi.sh status
 ```
-7. Open NiFi in your browser. Upload the template and run everything
-8. Check /user/vagrant/nifi_out in hdfs if files are uploading
-9. Put spark_silver_merge_1.py and spark_gold.py in /home/vagrant directory
-10. Remove checkpoints
-```
-cd /home/vagrant
-hdfs dfs -rm -r -f /chk/silver/bvg_events
-hdfs dfs -rm -r -f /chk/silver/weather_observations
-hdfs dfs -rm -r -f /chk/silver/nextbike_states
-```
-11. Run spark silver with Kafka
-```
-/usr/local/spark/bin/spark-submit \
-  --master local[2] \
-  --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.1.2 \
-  spark_silver_merge_1.py
-```
+10. Open NiFi in your browser. Upload the template and run everything
+11. Check /user/vagrant/nifi_out in hdfs if files are uploading
+
 12. Use beeline to see if data are uploading to Hive
 ```
 beeline -u "jdbc:hive2://localhost:10000/" -n vagrant -p vagrant
@@ -59,11 +60,11 @@ SELECT COUNT(*) FROM weather_observations;
 SELECT COUNT(*) FROM bvg_events;
 !q
 ```
-13. Run spark_gold.py
+13. Run spark_gold1.py
 ```
 /usr/local/spark/bin/spark-submit \
   --master local[2] \
-  spark_gold.py
+  spark_gold1.py
 ```
 14. Make a tunnel in MobaXterm. Specifically go to Tunneling -> New SSH tunnel and there type:
 

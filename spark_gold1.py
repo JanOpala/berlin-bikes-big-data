@@ -11,16 +11,12 @@ def create_spark():
         SparkSession.builder
         .appName("GoldSpark_BikeWeatherBvg")
         .enableHiveSupport()
-        # Wyłączenie algorytmu zamykania plików, który rzuca błędem
         .config("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
-        # WYŁĄCZENIE SUM KONTROLNYCH (To zastępuje RawLocalFileSystem w bezpieczny sposób)
         .config("spark.hadoop.fs.file.impl.disable.cache", "true")
-        # Ignorowanie problemów z uprawnieniami do mkdirs na lokalnym FS
         .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.shuffle.partitions", "5")
         .getOrCreate()
     )
-    # Dodatkowo wymuszamy na Hadoopie brak sprawdzania sum kontrolnych na poziomie sesji
     spark.sparkContext._jsc.hadoopConfiguration().set("fs.file.impl", "org.apache.hadoop.fs.RawLocalFileSystem")
     
     spark.sparkContext.setLogLevel("WARN")
@@ -32,7 +28,6 @@ def load_silver_tables(spark):
     return nextbike, weather, bvg
 
 def build_gold(nextbike, weather, bvg):
-    # 1. Deduplikacja Nextbike (bierzemy ostatni stan w danej godzinie)
     nb = (
         nextbike
         .withColumn(
@@ -51,7 +46,6 @@ def build_gold(nextbike, weather, bvg):
         )
     )
 
-    # 2. Agregacja Pogody
     w_agg = (
         weather
         .groupBy("dt", "hour")
@@ -62,7 +56,6 @@ def build_gold(nextbike, weather, bvg):
         )
     )
 
-    # 3. Agregacja BVG
     b_agg = (
         bvg
         .withColumnRenamed("dt_partition", "dt")
@@ -74,11 +67,9 @@ def build_gold(nextbike, weather, bvg):
         )
     )
 
-    # 4. Łączenie
     nb_w = nb.join(w_agg, on=["dt", "hour"], how="left")
     nb_w_b = nb_w.join(b_agg, on=["dt", "hour"], how="left")
 
-    # 5. Feature Engineering
     denom = (coalesce(col("bikes_available"), lit(0)) + coalesce(col("slots_available"), lit(0)))
 
     gold = (
@@ -105,7 +96,6 @@ def build_gold(nextbike, weather, bvg):
 def write_gold(spark, gold_df, table_name="bike_weather_bvg_features"):
     spark.sql("CREATE DATABASE IF NOT EXISTS gold")
     
-    # Usuwamy tabelę z metastore, żeby uniknąć konfliktów
     spark.sql(f"DROP TABLE IF EXISTS gold.{table_name}")
     
     print(f"Zapisuję tabelę gold.{table_name} (Format: Parquet, Committer v2)...")
@@ -120,7 +110,6 @@ def write_gold(spark, gold_df, table_name="bike_weather_bvg_features"):
     )
 
 if __name__ == "__main__":
-    # Ręczne czyszczenie plików przed startem
     print("Czyszczenie starego folderu warehouse...")
     os.system("rm -rf /home/vagrant/spark-warehouse/gold.db/bike_weather_bvg_features")
 
@@ -132,11 +121,11 @@ if __name__ == "__main__":
         write_gold(spark, gold_df)
         print("SUKCES: Tabela gold.bike_weather_bvg_features została utworzona.")
         
-        # Opcjonalnie: Szybkie sprawdzenie czy są dane
         count = spark.table("gold.bike_weather_bvg_features").count()
         print(f"Liczba wierszy w tabeli Gold: {count}")
         
     except Exception as e:
         print(f"BŁĄD PODCZAS PRZETWARZANIA: {e}")
     finally:
+
         spark.stop()
